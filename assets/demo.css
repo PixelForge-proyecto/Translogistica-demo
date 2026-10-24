@@ -1,0 +1,5 @@
+/* Identificación discreta de demostración y fondo con imagen opcional. */
+.demo-notice{background:#fff4cf;border-bottom:1px solid #e7ce7c;color:#594600;text-align:center;font-size:.82rem;line-height:1.5;padding:.45rem 1rem}
+.demo-login-hint{background:#fff4cf;border-left:4px solid #e0b200;border-radius:4px;padding:.75rem;color:#594600}
+.tl-hero{background-image:linear-gradient(90deg,rgba(9,20,29,.88),rgba(9,25,38,.62)),url("../images/camion-hero-banner.png") !important;background-position:center;background-size:cover}
+@media(max-width:575px){.demo-notice{font-size:.73rem}}
