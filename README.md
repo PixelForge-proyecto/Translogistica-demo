@@ -2,7 +2,7 @@
 
 Versión **estática** para evaluar la interfaz, el diseño y la navegación de Translogística.
 
-**URL prevista:** https://pixelforge-proyecto.github.io/translogistica-demo/
+**URL prevista:** https://pixelforge-proyecto.github.io/Translogistica-demo/index.html
 
 Conserva la portada de Laravel, CSS de Vite y los recursos gráficos de la segunda entrega. La vista de login es demostrativa y no recopila contraseñas.
 
