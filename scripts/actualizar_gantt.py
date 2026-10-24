@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sincroniza 57 actividades de GitHub Projects con las fechas del Roadmap."""
+"""Calcula y sincroniza fechas de una entrega (E1, E2 o E3) en GitHub Projects."""
 import argparse
 import datetime as dt
 import json
@@ -45,6 +45,10 @@ query($org:String!, $number:Int!, $cursor:String) {
               }
               ... on ProjectV2ItemFieldDateValue {
                 date
+                field { ... on ProjectV2FieldCommon { name } }
+              }
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
                 field { ... on ProjectV2FieldCommon { name } }
               }
             }
@@ -115,38 +119,53 @@ def norm(text):
     text = unicodedata.normalize("NFKD", str(text).casefold())
     return "".join(c for c in text if not unicodedata.combining(c))
 
-def read_tasks(items):
+def read_tasks(items, delivery):
+    """Lee únicamente los elementos etiquetados con esta entrega."""
     tasks = {}
+    selected_rows = 0
     for item in items:
         vals = {}
         for field_value in item["fieldValues"]["nodes"]:
             if not field_value or not field_value.get("field"):
                 continue
             name = norm(field_value["field"]["name"].strip())
-            vals[name] = field_value.get("text", field_value.get("number", field_value.get("date")))
+            vals[name] = field_value.get(
+                "name", field_value.get("text", field_value.get("number", field_value.get("date")))
+            )
+        if str(vals.get("entrega") or "").strip().upper() != delivery:
+            continue
+        selected_rows += 1
         title = ((item.get("content") or {}).get("title") or "").strip()
         tid = str(vals.get("id") or "").strip().upper()
         raw_duration = str(vals.get("dias") or "").strip()
         if not tid and not raw_duration:
-            continue  # Fila PRIMERA ENTREGA: encabezado, no actividad
-        match = re.search(r"\d+", raw_duration)
-        if not match or int(match.group()) < 1:
-            raise ValueError("Duración inválida en " + (tid or title))
-        if tid == "T3" and "definir nomenclatura y control de versiones" in norm(title):
-            print("AVISO: ID duplicado T3 en nomenclatura; se interpreta como T53. Corregir en Tabla.")
-            tid = "T53"
+            continue  # Encabezado sin actividad (por ejemplo, PRIMERA ENTREGA)
+        match = re.fullmatch(r"\s*(\d+)\s*(?:D[IÍ]AS?|D)?\s*", raw_duration, re.IGNORECASE)
+        if not match or int(match.group(1)) < 1:
+            raise ValueError("Duración inválida en " + (tid or title) + ": " + raw_duration)
         if not re.fullmatch(r"T\d+", tid) or tid in tasks:
-            raise ValueError("ID inválido o repetido: " + tid)
+            raise ValueError("ID inválido o repetido dentro de " + delivery + ": " + tid)
         predecessors = re.findall(r"\bT\d+\b", str(vals.get("precedentes") or "").upper())
         tasks[tid] = {
-            "item_id": item["id"], "title": title, "duration": int(match.group()),
-            "deps": predecessors
+            "item_id": item["id"], "title": title, "duration": int(match.group(1)),
+            "deps": predecessors,
+            "old_start": vals.get("inicio gantt"), "old_end": vals.get("fin gantt")
         }
-    if len(tasks) != 57:
-        raise ValueError(f"Esperaba 57 actividades, encontré {len(tasks)}; no se modificará nada.")
+    if not tasks:
+        raise ValueError("No hay actividades con Entrega=" + delivery + ". No se cambiará nada.")
+    if delivery == "E1" and len(tasks) != 57:
+        raise ValueError(
+            f"E1 debería conservar 57 actividades, encontré {len(tasks)}. "
+            "Revisar el campo Entrega antes de actualizar."
+        )
     missing = {dep for t in tasks.values() for dep in t["deps"] if dep not in tasks}
     if missing:
-        raise ValueError("Precedentes desconocidos: " + ", ".join(sorted(missing)))
+        raise ValueError(
+            f"{delivery}: precedentes no encontrados dentro de esta entrega: "
+            + ", ".join(sorted(missing))
+            + ". Si depende de otra entrega, hay que definir esa relación antes de actualizar."
+        )
+    print(f"Filas etiquetadas {delivery}: {selected_rows}; actividades válidas: {len(tasks)}.")
     return tasks
 
 def next_valid(date, weekdays):
@@ -182,16 +201,22 @@ def compute_dates(tasks, initial, weekdays):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--start-date", default="2026-08-03")
+    p.add_argument("--delivery", choices=("E1", "E2", "E3"), default="E1")
     p.add_argument("--calendar", choices=("weekdays", "calendar"), default="weekdays")
     p.add_argument("--mode", choices=("preview", "update"), default="preview")
     args = p.parse_args()
     token = os.environ.get("GH_PROJECT_TOKEN")
     if not token:
         raise RuntimeError("Falta GH_PROJECT_TOKEN en los secretos de GitHub Actions.")
+    if args.delivery != "E1" and args.start_date == "2026-08-03":
+        raise ValueError(
+            "Para E2 o E3 elegí una fecha inicial específica; 2026-08-03 es la fecha predeterminada de E1."
+        )
     project_id, fields, items = fetch_project(token)
-    tasks = read_tasks(items)
+    tasks = read_tasks(items, args.delivery)
     compute_dates(tasks, dt.date.fromisoformat(args.start_date), args.calendar == "weekdays")
-    print(f"Actividades: {len(tasks)}. Inicio: {args.start_date}. Días: {args.calendar}.")
+    print(f"Entrega: {args.delivery}. Actividades: {len(tasks)}. "
+          f"Inicio: {args.start_date}. Días: {args.calendar}.")
     for tid, t in tasks.items():
         print(f"{tid:4} {t['start']} → {t['end']}  ({t['duration']}d)  {t['title']}")
     print("Última finalización:", max(t["end"] for t in tasks.values()))
@@ -201,15 +226,21 @@ def main():
     start_field, end_field = fields.get("inicio gantt"), fields.get("fin gantt")
     if not start_field or not end_field:
         raise RuntimeError("Faltan campos de proyecto tipo Date: Inicio Gantt / Fin Gantt.")
-    for n, (tid, task) in enumerate(tasks.items(), 1):
+    changes = [
+        (tid, task) for tid, task in tasks.items()
+        if task["old_start"] != task["start"].isoformat()
+        or task["old_end"] != task["end"].isoformat()
+    ]
+    print(f"Se actualizarán {len(changes)} de {len(tasks)} actividades de {args.delivery}.")
+    for n, (tid, task) in enumerate(changes, 1):
         graphql(token, UPDATE, {
             "project": project_id, "item": task["item_id"],
             "startField": start_field, "endField": end_field,
             "startDate": task["start"].isoformat(),
             "endDate": task["end"].isoformat()
         })
-        print(f"Actualizada {n}/57: {tid}")
-    print("View 2 actualizado. Abrir Roadmap y seleccionar Inicio Gantt / Fin Gantt.")
+        print(f"Actualizada {n}/{len(changes)}: {tid}")
+    print(f"Entrega {args.delivery} sincronizada. Abrí la vista Diagrama en GitHub Projects.")
 
 if __name__ == "__main__":
     try:
