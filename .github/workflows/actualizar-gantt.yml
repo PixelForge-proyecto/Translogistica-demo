@@ -3,6 +3,15 @@ name: Actualizar Gantt de Translogística
 on:
   workflow_dispatch:
     inputs:
+      delivery:
+        description: "Entrega para calcular (solo modifica la elegida)"
+        required: true
+        type: choice
+        options:
+          - E1
+          - E2
+          - E3
+        default: E1
       start_date:
         description: "Fecha inicial (AAAA-MM-DD)"
         required: true
@@ -15,7 +24,7 @@ on:
         options:
           - weekdays
           - calendar
-        default: weekdays
+        default: calendar
       mode:
         description: "Vista previa o actualizar fechas"
         required: true
@@ -43,11 +52,13 @@ jobs:
       - name: Calcular fechas y actualizar GitHub Projects
         env:
           GH_PROJECT_TOKEN: ${{ secrets.GANTT_PROJECT_TOKEN }}
+          INPUT_DELIVERY: ${{ inputs.delivery }}
           INPUT_START_DATE: ${{ inputs.start_date }}
           INPUT_CALENDAR: ${{ inputs.calendar }}
           INPUT_MODE: ${{ inputs.mode }}
         run: |
           python scripts/actualizar_gantt.py \
+            --delivery "$INPUT_DELIVERY" \
             --start-date "$INPUT_START_DATE" \
             --calendar "$INPUT_CALENDAR" \
             --mode "$INPUT_MODE"
