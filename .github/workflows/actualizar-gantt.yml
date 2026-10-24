@@ -1,0 +1,53 @@
+name: Actualizar Gantt de Translogística
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Fecha inicial (AAAA-MM-DD)"
+        required: true
+        type: string
+        default: "2026-08-03"
+      calendar:
+        description: "Calendario de trabajo"
+        required: true
+        type: choice
+        options:
+          - weekdays
+          - calendar
+        default: weekdays
+      mode:
+        description: "Vista previa o actualizar fechas"
+        required: true
+        type: choice
+        options:
+          - preview
+          - update
+        default: preview
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gantt-translogistica
+  cancel-in-progress: false
+
+jobs:
+  actualizar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Calcular fechas y actualizar GitHub Projects
+        env:
+          GH_PROJECT_TOKEN: ${{ secrets.GANTT_PROJECT_TOKEN }}
+          INPUT_START_DATE: ${{ inputs.start_date }}
+          INPUT_CALENDAR: ${{ inputs.calendar }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          python scripts/actualizar_gantt.py \
+            --start-date "$INPUT_START_DATE" \
+            --calendar "$INPUT_CALENDAR" \
+            --mode "$INPUT_MODE"
