@@ -120,9 +120,9 @@ def norm(text):
     return "".join(c for c in text if not unicodedata.combining(c))
 
 def read_tasks(items, delivery):
-    """Lee únicamente los elementos etiquetados con esta entrega."""
-    tasks = {}
-    selected_rows = 0
+    """Devuelve las actividades de la entrega y fechas externas de entregas anteriores."""
+    catalog = {}
+    tagged_count = 0
     for item in items:
         vals = {}
         for field_value in item["fieldValues"]["nodes"]:
@@ -132,69 +132,105 @@ def read_tasks(items, delivery):
             vals[name] = field_value.get(
                 "name", field_value.get("text", field_value.get("number", field_value.get("date")))
             )
-        if str(vals.get("entrega") or "").strip().upper() != delivery:
-            continue
-        selected_rows += 1
+        row_delivery = str(vals.get("entrega") or "").strip().upper()
+        if row_delivery == delivery:
+            tagged_count += 1
         title = ((item.get("content") or {}).get("title") or "").strip()
         tid = str(vals.get("id") or "").strip().upper()
         raw_duration = str(vals.get("dias") or "").strip()
         if not tid and not raw_duration:
-            continue  # Encabezado sin actividad (por ejemplo, PRIMERA ENTREGA)
-        match = re.fullmatch(r"\s*(\d+)\s*(?:D[IÍ]AS?|D)?\s*", raw_duration, re.IGNORECASE)
-        if not match or int(match.group(1)) < 1:
-            raise ValueError("Duración inválida en " + (tid or title) + ": " + raw_duration)
-        if not re.fullmatch(r"T\d+", tid) or tid in tasks:
-            raise ValueError("ID inválido o repetido dentro de " + delivery + ": " + tid)
-        predecessors = re.findall(r"\bT\d+\b", str(vals.get("precedentes") or "").upper())
-        tasks[tid] = {
-            "item_id": item["id"], "title": title, "duration": int(match.group(1)),
-            "deps": predecessors,
+            continue  # Encabezado de entrega, sin tarea
+        if not re.fullmatch(r"T\d+", tid) or tid in catalog:
+            raise ValueError("ID de actividad inválido o duplicado: " + (tid or title))
+        catalog[tid] = {
+            "item_id": item["id"], "title": title, "raw_duration": raw_duration,
+            "delivery": row_delivery,
+            "deps": re.findall(r"\bT\d+\b", str(vals.get("precedentes") or "").upper()),
             "old_start": vals.get("inicio gantt"), "old_end": vals.get("fin gantt")
         }
+
+    tasks = {}
+    for tid, row in catalog.items():
+        if row["delivery"] != delivery:
+            continue
+        match = re.fullmatch(
+            r"\s*(\d+)\s*(?:D[IÍ]AS?|D)?\s*", row["raw_duration"], re.IGNORECASE
+        )
+        if not match or int(match.group(1)) < 1:
+            raise ValueError("Duración inválida en " + tid + ": " + row["raw_duration"])
+        tasks[tid] = {
+            **row, "duration": int(match.group(1))
+        }
+
     if not tasks:
-        raise ValueError("No hay actividades con Entrega=" + delivery + ". No se cambiará nada.")
+        raise ValueError("No hay actividades con Entrega=" + delivery + ". Nada fue modificado.")
     if delivery == "E1" and len(tasks) != 57:
         raise ValueError(
-            f"E1 debería conservar 57 actividades, encontré {len(tasks)}. "
+            f"E1 debería tener 57 actividades y encontré {len(tasks)}. "
             "Revisar el campo Entrega antes de actualizar."
         )
-    missing = {dep for t in tasks.values() for dep in t["deps"] if dep not in tasks}
-    if missing:
-        raise ValueError(
-            f"{delivery}: precedentes no encontrados dentro de esta entrega: "
-            + ", ".join(sorted(missing))
-            + ". Si depende de otra entrega, hay que definir esa relación antes de actualizar."
-        )
-    print(f"Filas etiquetadas {delivery}: {selected_rows}; actividades válidas: {len(tasks)}.")
-    return tasks
+
+    external_ends = {}
+    for tid, row in tasks.items():
+        for dep in row["deps"]:
+            if dep in tasks:
+                continue
+            prev = catalog.get(dep)
+            if not prev:
+                raise ValueError(f"{tid}: precedente {dep} inexistente.")
+            if prev["delivery"] not in ("E1", "E2", "E3"):
+                raise ValueError(f"{tid}: {dep} no tiene entrega definida.")
+            if int(prev["delivery"][1]) >= int(delivery[1]):
+                raise ValueError(f"{tid}: {dep} pertenece a una entrega posterior o igual.")
+            if not prev["old_end"]:
+                raise ValueError(
+                    f"{tid}: la actividad anterior {dep} no tiene Fin Gantt. "
+                    "Calculá primero las entregas anteriores."
+                )
+            try:
+                external_ends[dep] = dt.date.fromisoformat(prev["old_end"])
+            except ValueError:
+                raise ValueError(f"{tid}: fecha de finalización inválida en {dep}.") from None
+
+    print(
+        f"Entrega {delivery}: {len(tasks)} actividades; "
+        f"{len(external_ends)} precedentes de entregas anteriores."
+    )
+    return tasks, external_ends
 
 def next_valid(date, weekdays):
     while weekdays and date.weekday() >= 5:
         date += dt.timedelta(days=1)
     return date
 
-def compute_dates(tasks, initial, weekdays):
+def compute_dates(tasks, external_ends, initial, weekdays):
     done, active = set(), set()
+
     def compute(tid):
         if tid in done:
             return
         if tid in active:
             raise ValueError("Dependencia circular en " + tid)
         active.add(tid)
-        t = tasks[tid]
-        for dep in t["deps"]:
-            compute(dep)
-        candidate = (
-            max(tasks[d]["end"] for d in t["deps"]) + dt.timedelta(days=1)
-            if t["deps"] else initial
+        task = tasks[tid]
+        predecessor_ends = []
+        for dep in task["deps"]:
+            if dep in tasks:
+                compute(dep)
+                predecessor_ends.append(tasks[dep]["end"])
+            else:
+                predecessor_ends.append(external_ends[dep])
+        candidate = max(
+            [initial] + [end + dt.timedelta(days=1) for end in predecessor_ends]
         )
         begin = next_valid(candidate, weekdays)
         end = begin
-        for _ in range(t["duration"] - 1):
+        for _ in range(task["duration"] - 1):
             end = next_valid(end + dt.timedelta(days=1), weekdays)
-        t["start"], t["end"] = begin, end
+        task["start"], task["end"] = begin, end
         active.remove(tid)
         done.add(tid)
+
     for task_id in tasks:
         compute(task_id)
 
@@ -213,8 +249,8 @@ def main():
             "Para E2 o E3 elegí una fecha inicial específica; 2026-08-03 es la fecha predeterminada de E1."
         )
     project_id, fields, items = fetch_project(token)
-    tasks = read_tasks(items, args.delivery)
-    compute_dates(tasks, dt.date.fromisoformat(args.start_date), args.calendar == "weekdays")
+    tasks, external_ends = read_tasks(items, args.delivery)
+    compute_dates(tasks, external_ends, dt.date.fromisoformat(args.start_date), args.calendar == "weekdays")
     print(f"Entrega: {args.delivery}. Actividades: {len(tasks)}. "
           f"Inicio: {args.start_date}. Días: {args.calendar}.")
     for tid, t in tasks.items():
