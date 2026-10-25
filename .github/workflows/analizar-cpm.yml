@@ -1,0 +1,43 @@
+name: Calcular holgura y caminos críticos
+
+on:
+  workflow_dispatch:
+    inputs:
+      delivery:
+        description: "Entrega para el análisis CPM"
+        type: choice
+        required: true
+        default: ALL
+        options:
+          - ALL
+          - E1
+          - E2
+          - E3
+      mode:
+        description: "preview = comprobar, update = completar columnas"
+        type: choice
+        required: true
+        default: preview
+        options:
+          - preview
+          - update
+
+jobs:
+  analizar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Calcular holgura y caminos críticos
+        env:
+          GH_PROJECT_TOKEN: ${{ secrets.GANTT_PROJECT_TOKEN }}
+          INPUT_DELIVERY: ${{ inputs.delivery }}
+          INPUT_MODE: ${{ inputs.mode }}
+        run: |
+          python scripts/analizar_cpm.py \
+            --delivery "$INPUT_DELIVERY" \
+            --mode "$INPUT_MODE"
